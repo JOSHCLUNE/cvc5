@@ -1,0 +1,90 @@
+# Manual release builds: produces the cvc5 binary per OS and attaches it to a GitHub release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag of the release to upload assets to (for example v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+name: Release build
+
+concurrency:
+  group: release-assets-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell || 'bash' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Build on Ubuntu
+            os: ubuntu-latest
+            shell: bash
+            windows-build: false
+          - name: Build on macOS
+            os: macos-latest
+            shell: bash
+            windows-build: false
+          - name: Build on Windows
+            os: windows-latest
+            windows-build: true
+            shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-dependencies
+        with:
+          windows-build: ${{ matrix.windows-build }}
+          shell: ${{ matrix.shell }}
+
+      - name: Build cvc5
+        run: |
+          set -eux
+          if [ -d cvc5 ]; then cd cvc5; fi
+          extra_flags=
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            extra_flags=--win64-native
+          fi
+          ./configure.sh --tracing --auto-download ${extra_flags}
+          cd build
+          make
+
+      - name: Stage release binary
+        id: asset
+        run: |
+          set -eux
+          if [ -d cvc5 ]; then root=cvc5; else root=.; fi
+          case "${{ runner.os }}" in
+            Linux)   suffix=linux-${{ runner.arch }} ;;
+            macOS)   suffix=macos-${{ runner.arch }} ;;
+            Windows) suffix=windows-${{ runner.arch }} ;;
+            *)       suffix=${{ runner.os }}-${{ runner.arch }} ;;
+          esac
+          mkdir -p release-assets
+          if [ -f "$root/build/bin/cvc5.exe" ]; then
+            cp "$root/build/bin/cvc5.exe" "release-assets/cvc5-${suffix}.exe"
+            echo "path=release-assets/cvc5-${suffix}.exe" >> "$GITHUB_OUTPUT"
+          else
+            cp "$root/build/bin/cvc5" "release-assets/cvc5-${suffix}"
+            echo "path=release-assets/cvc5-${suffix}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: ${{ steps.asset.outputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
